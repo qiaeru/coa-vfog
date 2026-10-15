@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Project Reforged's tuned settings, from https://projectreforged.github.io/wotlk/downloads/.
+  # Pinned so that an upstream change fails the build instead of shipping silently;
+  # to follow a new version, update both values.
+  REFORGED_PRESET_URL: https://pub-0f05631d243e4046993fc02ca7be9542.r2.dev/Wrath%20of%20the%20Lich%20King/mods/presets/CoAVolFog.ini
+  REFORGED_PRESET_SHA256: 2245ee64f81b3246a0fba502fa7fa950be233b80fc40ef6020a4e46c911cdae7
+
+jobs:
+  build:
+    # Pinned image rather than windows-latest, which moves without notice.
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A Win32
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # ctest is not run: vfog_harness needs a real Direct3D 9 device, which hosted runners lack.
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $files = 'version.dll', 'CoAVolFog.dll', 'CoAVolFog.ini', 'fogdata.bin', 'waterdata.bin'
+          New-Item -ItemType Directory -Force dist/default, dist/project-reforged | Out-Null
+          foreach ($f in $files) {
+            Copy-Item "build/Release/$f" dist/default/
+            Copy-Item "build/Release/$f" dist/project-reforged/
+          }
+          Invoke-WebRequest $env:REFORGED_PRESET_URL -OutFile dist/project-reforged/CoAVolFog.ini
+          $hash = (Get-FileHash dist/project-reforged/CoAVolFog.ini -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:REFORGED_PRESET_SHA256) {
+            throw "Project Reforged preset changed (sha256 $hash); review it and update REFORGED_PRESET_SHA256."
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coa-vfog-${{ github.sha }}
+          path: dist/default/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coa-vfog-project-reforged-${{ github.sha }}
+          path: dist/project-reforged/
+          if-no-files-found: error
